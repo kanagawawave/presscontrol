@@ -1,0 +1,985 @@
+substitutions:
+  pressuretolerance: "0.3"
+  relaygpio: "GPIO38"
+  adssda: "GPIO8"
+  adsscl: "GPIO9"
+  maxmiso: "GPIO40"
+  maxclk: "GPIO41"
+  maxcs: "GPIO42"
+
+esphome:
+  name: pressureswitchs3
+  friendly_name: pressureswitchs3
+  on_boot:
+    - priority: -500
+      then:
+        - lambda: |-
+            id(buscheck).execute(1);
+
+preferences:
+  flash_write_interval: 10min
+
+esp32:
+  board: esp32-s3-devkitc1-n16r8
+  flash_size: 16MB
+  flash_mode: dio
+  framework:
+    type: esp-idf
+    version: recommended
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+packages:
+  - !include lvgl.yml
+
+# Enable logging
+logger:
+  hardware_uart: UART0
+  baud_rate: 115200
+  level: WARN
+
+wifi:
+  id: wifi_id
+  power_save_mode: none
+  # ap:
+  #   ssid: "MATW"
+  #   password: "super_secure_password"
+
+  ssid: "my_ssid"
+  password: "secure_password"
+
+  reboot_timeout: 5min
+
+  enable_on_boot: false
+  on_connect:
+    - lambda: |-
+        lv_obj_set_style_text_color(id(wifi_status), lv_color_hex(0x00FF00), LV_PART_MAIN);
+  on_disconnect:
+    - lambda: |-
+        lv_obj_set_style_text_color(id(wifi_status), lv_color_hex(0x333333), LV_PART_MAIN);
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  # ap:
+  #   password: !secret AP_Password
+
+# Enable Home Assistant API
+# api:
+  # encryption:
+  #   key: !secret encryption_key
+
+ota:
+  - platform: web_server
+  - platform: esphome
+    id: ota_state
+    on_begin:
+      - lambda: |-
+          id(display_backlight).turn_on().set_transition_length(0).perform();
+          id(display_backlight).loop();
+
+          lv_label_set_text(id(ota_label_primary), "Atualização Iniciada!");
+          lv_label_set_text(id(ota_label_secondary), "Aguarde...");
+          lv_bar_set_value(ota_bar_value, 0, LV_ANIM_ON);
+          lv_obj_clear_flag(id(ota_widget), LV_OBJ_FLAG_HIDDEN);
+
+    on_progress:
+      - lambda: |-
+          lv_bar_set_value(ota_bar_value, (int)x, LV_ANIM_ON);
+          lv_label_set_text_fmt(id(ota_label_secondary), "%0.1f%%", x);
+          id(lvgl_id).loop();
+
+    on_end:
+      - lambda: |-
+          lv_bar_set_value(ota_bar_value, 100, LV_ANIM_ON);
+          lv_label_set_text(id(ota_label_primary), "Atualizção Completa!");
+          lv_label_set_text(id(ota_label_secondary), "Reiniciando...");
+
+    on_error:
+      - lambda: |-
+          lv_label_set_text(id(ota_label_primary), "ERRO na Atualizção!");
+          lv_label_set_text(id(ota_label_secondary), "Aperte Qualquer Botão Para Voltar.");
+          lv_bar_set_value(ota_bar_value, 0, LV_ANIM_ON);
+          id(ota_err) = true;
+ # password: !secret OTA_Password
+
+web_server:
+  port: 80
+  # auth:
+  #   username: !secret web_server_username
+  #   password: !secret web_server_password
+  version: 3
+  local: true
+  js_include: "v3.js" #download latest webserver js here https://oi.esphome.io/v3/www.js
+  js_url: ""
+  include_internal: true
+  sorting_groups:
+    - id: general_stat
+      name: "Configuração"
+      sorting_weight: 1
+    - id: sensor_stat
+      name: "Status"
+      sorting_weight: 100
+    - id: maxtime_config
+      name: "Config Temp."
+      sorting_weight: 200
+    - id: pressure_config
+      name: "Configuração de Pressão"
+      sorting_weight: 300
+    - id: cal_config
+      name: "Calibrar Transdutor(linear)"
+      sorting_weight: 400
+    - id: lowlevel
+      name: "Misc. [Low Level]"
+      sorting_weight: 500
+
+
+# captive_portal:
+
+globals:
+  - id: error_mask
+    type: uint32_t
+    restore_value: false
+    initial_value: "0" # 0xFFF to set all errors true (bits 0-11)
+
+  - id: _glbl_timeout_ticks
+    type: int
+    restore_value: false
+    initial_value: "0"
+
+i2c:
+  - id: i2c_bus_a
+    sda: ${adssda}
+    scl: ${adsscl}
+    scan: true
+
+spi:
+  - id: bus_max6675
+    miso_pin: ${maxmiso}
+    clk_pin: ${maxclk}
+
+ads1115:
+  - id: ads1115_0
+    i2c_id: i2c_bus_a
+    address: 0x48
+    continuous_mode: off
+
+switch:
+  - name: "Status Fluxostato"
+    id: "flowswitchbn"
+    platform: template
+    optimistic: true
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 2
+
+  - name: "Relay Bomba"
+    id: "pumprelay"
+    platform: gpio
+    pin:
+      number: ${relaygpio}
+      inverted: true
+      mode:
+        output: true
+        open_drain: true
+    restore_mode: ALWAYS_OFF
+    on_state:
+      - lvgl.widget.update:
+          id: toggle_switch_3
+          state:
+            checked: !lambda return x;
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 3
+
+  - name: "Ativar WIFI"
+    id: "wifisw"
+    platform: template
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    setup_priority: -400
+    turn_on_action:
+      - wifi.enable:
+    turn_off_action:
+      - wifi.disable:
+    on_state:
+      - lvgl.widget.update:
+          id: toggle_switch_4
+          state:
+            checked: !lambda return x;
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 4
+
+  - platform: restart
+    id: "rstdvc"
+    name: "Reiniciar Controlador"
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 10
+
+  - platform: factory_reset
+    id: "factoryrst"
+    name: Restaurar Padrões de Fábrica
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 11
+
+  - name: "Status Bomba:"
+    platform: template
+    id: bombatmpt
+    optimistic: true
+    device_class: "switch"
+    entity_category: "config"
+    lambda: |-
+      auto p = id(pressure_status_bar).state;
+
+      if (id(error_mask) != 0 || p >= id(highpressure).state) return false;
+      if (p >= 0 && p <= id(lowpressure).state) return true;
+      return {};
+    on_turn_on:
+      then:
+        - script.execute: _timer_tick
+        - switch.turn_on: pumprelay
+    on_turn_off:
+      then:
+        - switch.turn_off: pumprelay
+        - lambda: |-
+            id(_timer_tick).stop();
+            id(_glbl_timeout_ticks) = 0;
+
+            if (id(flxmnt).state) {
+              id(flw_opn_chck).execute();
+            }
+    on_state:
+      - lvgl.widget.update:
+          id: func_info_state
+          state:
+            checked: !lambda return x;
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 3
+
+  - platform: template
+    id: flxmnt
+    name: "Monitorar Fluxostato"
+    optimistic: true
+    device_class: "switch"
+    entity_category: "config"
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_state:
+      - lvgl.widget.update:
+          id: toggle_switch_1
+          state:
+            checked: !lambda return x;
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 7
+
+  - platform: template
+    id: tmpmnt
+    name: "Monitorar Temperatura"
+    optimistic: true
+    device_class: "switch"
+    entity_category: "config"
+    restore_mode: RESTORE_DEFAULT_OFF
+    setup_priority: -400
+    on_state:
+      - lvgl.widget.update:
+          id: toggle_switch_2
+          state:
+            checked: !lambda return x;
+      - if:
+          condition:
+            lambda: 'return id(popup_active) || id(control_menu_active);'
+          then:
+            - script.execute: render_control_menu
+    turn_on_action:
+      - lambda: |-
+          id(tempsens).start_poller();
+          lv_obj_set_style_text_color(id(temp_status), lv_color_hex(0x00FF00), LV_PART_MAIN);
+          //run script in mode 3 to check a possible spi fault
+          id(buscheck).execute(3);
+    turn_off_action:
+      - lambda: |-
+          id(tempsens).stop_poller();
+          lv_obj_set_style_text_color(id(temp_status), lv_color_hex(0x333333), LV_PART_MAIN);
+          lv_label_set_text(id(temp_status), "\U000F0504");
+
+          //if the max6675 or thermopar is at fault we clear the flag when fliping the switch off
+          if (id(error_mask) |= 0x100) {
+            id(error_mask) &= ~0x100;
+            id(statuschecker).update();
+          }
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 8
+
+  - platform: template
+    id: "opr_mode"
+    name: "Modo de Operação [Água-Ar]:"
+    restore_mode: RESTORE_DEFAULT_OFF
+    setup_priority: -400
+    internal: true
+    optimistic: true
+    on_state:
+      - lvgl.widget.update:
+          id: toggle_switch_5
+          state:
+            checked: !lambda return x;
+      - if:
+          condition:
+            lambda: 'return id(popup_active) || id(control_menu_active);'
+          then:
+            - script.execute: render_control_menu
+    turn_on_action:
+      - lambda: |-
+          lv_label_set_text(id(func_info_label), "Status Motor:");
+      - if:
+          condition:
+            switch.is_on: flxmnt
+          then:
+            - switch.turn_off: flxmnt
+    turn_off_action:
+      - lambda: |-
+          lv_label_set_text(id(func_info_label), "Status Bomba:");
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 9
+
+  - platform: template
+    id: "pausectr"
+    name: "Pausar Controlador:"
+    restore_mode: RESTORE_DEFAULT_OFF
+    setup_priority: -400
+    internal: true
+    optimistic: true
+    on_state:
+      - lvgl.widget.update:
+          id: toggle_switch_6
+          state:
+            checked: !lambda return x;
+    turn_on_action:
+      - lambda: |-
+          id(error_mask) |= 0x400;
+          id(statuschecker).update();
+    turn_off_action:
+      - lambda: |-
+          id(error_mask) &= ~0x400;
+          id(statuschecker).update();
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 10
+
+number:
+  - platform: template
+    id: cal_x1
+    name: "Cal X1"
+    min_value: 0
+    max_value: 10
+    mode: box
+    step: 0.01
+    initial_value: 4.0
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(selected_control_index) == 8 && id(popup_active)) {
+              lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x * 100));
+            }
+
+            if (x == id(cal_x2).state) {
+              id(error_mask) |= 0x800;
+            } else {
+              id(error_mask) &= ~0x800;
+            }
+            id(statuschecker).update();
+    web_server:
+      sorting_group_id: cal_config
+      sorting_weight: 401
+
+  - platform: template
+    id: cal_y1
+    name: "Cal Y1"
+    min_value: 0
+    max_value: 10
+    mode: box
+    step: 0.01
+    initial_value: 0.0
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(selected_control_index) == 9 && id(popup_active)) {
+              lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x * 100));
+            }
+
+            if (x == id(cal_y2).state) {
+              id(error_mask) |= 0x1000;
+            } else {
+              id(error_mask) &= ~0x1000;
+            }
+            id(statuschecker).update();
+    web_server:
+      sorting_group_id: cal_config
+      sorting_weight: 402
+
+  - platform: template
+    id: cal_x2
+    name: "Cal X2"
+    min_value: 0
+    max_value: 10
+    mode: box
+    step: 0.01
+    initial_value: 10.0
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(selected_control_index) == 10 && id(popup_active)) {
+              lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x * 100));
+            }
+
+            if (x == id(cal_x1).state) {
+              id(error_mask) |= 0x800;
+            } else {
+              id(error_mask) &= ~0x800;
+            }
+            id(statuschecker).update();
+    web_server:
+      sorting_group_id: cal_config
+      sorting_weight: 403
+
+  - platform: template
+    id: cal_y2
+    name: "Cal Y2"
+    min_value: 0
+    max_value: 10
+    mode: box
+    step: 0.01
+    initial_value: 1.0
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(selected_control_index) == 11 && id(popup_active)) {
+              lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x * 100));
+            }
+
+            if (x == id(cal_y1).state) {
+              id(error_mask) |= 0x1000;
+            } else {
+              id(error_mask) &= ~0x1000;
+            }
+            id(statuschecker).update();
+    web_server:
+      sorting_group_id: cal_config
+      sorting_weight: 404
+
+  - name: "Temperatura Máxima:"
+    id: pump_maxtmp
+    platform: template
+    entity_category: "config"
+    unit_of_measurement: °C
+    mode: box
+    min_value: 40
+    max_value: 80
+    step: 1
+    initial_value: 50
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(selected_control_index) == 5 && id(popup_active)) {
+              lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x));
+            }
+    web_server:
+      sorting_group_id: maxtime_config
+      sorting_weight: 202
+
+  - name: "Tempo Máx. Bomba:"
+    id: pump_time
+    platform: template
+    entity_category: "config"
+    unit_of_measurement: seconds
+    mode: box
+    min_value: 60
+    max_value: 1200
+    step: 1
+    initial_value: 300
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(selected_control_index) == 6 && id(popup_active)) {
+              lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x));
+            }
+    web_server:
+      sorting_group_id: maxtime_config
+      sorting_weight: 203
+
+  - name: "Tempo Máx. Fluxostato:"
+    id: flowswtime
+    platform: template
+    entity_category: "config"
+    unit_of_measurement: seconds
+    mode: box
+    min_value: 15
+    max_value: 60
+    step: 1
+    initial_value: 15
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(selected_control_index) == 7 && id(popup_active)) {
+              lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x));
+            }
+    web_server:
+      sorting_group_id: maxtime_config
+      sorting_weight: 204
+
+  - name: "Pressão de Acionamento:"
+    id: lowpressure
+    platform: template
+    entity_category: "config"
+    unit_of_measurement: Bar
+    mode: box
+    min_value: 0.5
+    max_value: 5.0
+    step: 0.1
+    initial_value: 0.5
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        lambda: |-
+          if (id(selected_control_index) == 3 && id(popup_active)) {
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x * 10));
+          }
+
+          if (round(id(highpressure).state * 100) / 100.0 - round(x * 100) / 100.0 <= ${pressuretolerance}) {
+            id(error_mask) |= 0x20;
+          } else {
+            id(error_mask) &= ~0x20;
+          }
+
+          if (x >= id(highpressure).state) {
+            id(error_mask) |= 0x80;
+          } else {
+            id(error_mask) &= ~0x80;
+          }
+          id(statuschecker).update();
+          lv_label_set_text_fmt(id(aci_info_state), "%.2f Bar", x);
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 5
+
+  - name: "Pressão de Parada:"
+    id: highpressure
+    platform: template
+    entity_category: "config"
+    unit_of_measurement: Bar
+    mode: box
+    min_value: 0.5
+    max_value: 5.0
+    step: 0.1
+    initial_value: 1
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        lambda: |-
+          if (id(selected_control_index) == 4 && id(popup_active)) {
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(x * 10));
+          }
+
+          if (round(x * 100) / 100.0 - round(id(lowpressure).state * 100) / 100.0 <= ${pressuretolerance}) {
+            id(error_mask) |= 0x20;
+          } else {
+            id(error_mask) &= ~0x20;
+          }
+
+          if (x <= id(lowpressure).state) {
+            id(error_mask) |= 0x80;
+          } else {
+            id(error_mask) &= ~0x80;
+          }
+          id(statuschecker).update();
+          lv_label_set_text_fmt(id(par_info_state), "%.2f Bar", x);
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 6
+
+sensor:
+  - platform: ads1115
+    ads1115_id: ads1115_0
+    multiplexer: 'A0_GND'
+    gain: 6.144
+    name: "ADS1115_A0:"
+    id: raw_adsA0
+    update_interval: 250ms
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    filters:
+      - timeout: 3s
+    on_value:
+      then:
+        - lambda: |-
+
+            //Execute buscheck script mode 2 to check ads1115/i2c mid-run failures
+            if (isnan(x)) {
+              id(buscheck).execute(2);
+              lv_label_set_text(id(adc_info_state), "ERR");
+              return;
+            }
+            lv_label_set_text_fmt(id(adc_info_state), "%.3fV", x);
+            if (id(selected_control_index) >= 8 && id(selected_control_index) <= 11) {
+              lv_label_set_text_fmt(id(popup_ads_label_idle), "ADC: %.3fV", x);
+            }
+
+            //15% deviation allowed in transducer V
+            bool transducer_fault = x == 0.0f || x < (id(cal_x1).state * 0.85);
+            bool was_fault = id(error_mask) & 0x04;
+
+            if (transducer_fault && !was_fault) {
+              id(error_mask) |= 0x04;
+              id(statuschecker).update();
+              lv_label_set_text(id(pressure_info_state), "ERR");
+            }
+
+    web_server:
+      sorting_group_id: sensor_stat
+      sorting_weight: 101
+
+  - platform: copy
+    name: "Pressão Transdutor [Bar]:"
+    source_id: raw_adsA0
+    id: pressure_status_bar
+    unit_of_measurement: "Bar"
+    accuracy_decimals: 3
+    filters:
+      - timeout: 3s
+      - lambda: |-
+          float x1 = id(cal_x1).state, y1 = id(cal_y1).state;
+          float x2 = id(cal_x2).state, y2 = id(cal_y2).state;
+          if (x2 == x1) return x;
+          return y1 + (x - x1) * (y2 - y1) / (x2 - x1);
+    on_value:
+      then:
+        - lambda: |-
+
+            // return early if transducer presents fault
+            if (id(error_mask) & 0x04) return;
+
+            float bar = x;
+            float psi = bar * 14.5038f;
+            float mca = bar * 10.1972f;
+            float Kgfcm2 = bar * 1.0197f;
+
+            if (!id(opr_mode).state) {
+              lv_label_set_text(id(pressurebar_info_label), "Pressão:");
+              lv_label_set_text_fmt(id(pressure_info_state), "%.2f Bar %.2f Psi %.2f Mca", bar, psi, mca);
+            } else {
+              lv_label_set_text(id(pressurebar_info_label), "P:");
+              lv_label_set_text_fmt(id(pressure_info_state), "%.2f Bar %.2f Psi %.2f Kgf/cm2", bar, psi, Kgfcm2);
+            }
+
+    web_server:
+      sorting_group_id: sensor_stat
+      sorting_weight: 102
+
+  - platform: max6675 #https://discord.com/channels/429907082951524364/1288704721758060555/1288960532644368475
+    spi_id: bus_max6675
+    id: "tempsens"
+    name: "Temp Bomba:"
+    cs_pin: ${maxcs}
+    update_interval: 30s
+    filters:
+      - lambda: 'return (x == 0.0f ? NAN : x);'
+      - timeout: 35s
+    on_value:
+      then:
+       - lambda: |-
+            if (id(tmpmnt).state) {
+
+              //if the temp monitor is ON we check for a possible thermocouple/max6675 fault at runtime
+              if (isnan(x)) {
+                id(buscheck).execute(3);
+                return;
+              }
+
+              uint32_t prev = id(error_mask);
+
+              // high-temp check
+              lv_label_set_text_fmt(id(temp_status), "%.1f\U000F0504", x);
+              bool htemp = x >= id(pump_maxtmp).state;
+              bool was_htemp = prev & 0x40;
+
+              if (htemp && !was_htemp) {
+                id(error_mask) |= 0x40;
+                id(statuschecker).update();
+              }
+            }
+    web_server:
+      sorting_group_id: sensor_stat
+      sorting_weight: 103
+
+  - platform: duty_time
+    id: pumpworktime
+    name: "Tempo Total de Trabalho da Bomba:"
+    lambda: "return id(bombatmpt).state;"
+    restore: false
+    accuracy_decimals: 1
+    on_value:
+      then:
+        - lambda: |-
+            lv_label_set_text_fmt(id(ttime_info_state), "%.1fs", x);
+    last_time:
+      id: last_pumpcicle
+      name: "Último Ciclo:"
+      accuracy_decimals: 1
+      on_value:
+        then:
+          - lambda: |-
+              lv_label_set_text_fmt(id(ltime_info_state), "%.1fs", x);
+      web_server:
+        sorting_group_id: sensor_stat
+        sorting_weight: 104
+    web_server:
+      sorting_group_id: sensor_stat
+      sorting_weight: 105
+
+text_sensor:
+  - platform: template
+    name: "Diagnóstico:"
+    id: statuschecker
+    update_interval: never
+    lambda: |-
+      uint32_t mask = id(error_mask);
+      std::string out;
+      if (mask & 0x01) out += "Bomba Excedeu o Tempo Maximo, ";
+      if (mask & 0x02) out += "Falha ADS1115, ";
+      if (mask & 0x04) out += "Falha Transdutor, ";
+      if (mask & 0x08) out += "Falta de Agua ou Fluxostato Fechado, ";
+      if (mask & 0x10) out += "Fluxatato Travado em Aberto, ";
+      if (mask & 0x20) out += "Tole. Min Aci/Des: <=0.3, ";
+      if (mask & 0x40) out += "Superaquecimento, ";
+      if (mask & 0x80) out += "Press. de Aci. >= Para., ";
+      if (mask & 0x100) out += "Falha MAX6675, ";
+      if (mask & 0x200) out += "Falha Termopar, ";
+      if (mask & 0x400) out += "Controlador Pausado, ";
+      if (mask & 0x800) out += "X1 == X2(V), ";
+      if (mask & 0x1000) out += "Y1 == Y2(P), ";
+      if (out.empty()) {
+        lv_obj_set_style_text_color(id(warn_status), lv_color_hex(0x333333), LV_PART_MAIN);
+        return std::string("OK");
+      } else {
+        lv_obj_set_style_text_color(id(warn_status), lv_color_hex(0xFF0000), LV_PART_MAIN);
+      }
+      return out.substr(0, out.size() - 2);
+
+    on_value:
+      then:
+        - lambda: |-
+            std::string s = id(statuschecker).state;
+            std::string out;
+            for (char c : s) {
+              out += c;
+              if (c == ',') out += '\n';
+            }
+            lv_label_set_text(id(text_info_state), out.c_str());
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 2
+
+button:
+  - name: "Reiniciar Opr:"
+    id: "restartop"
+    platform: template
+    on_press:
+      then:
+        - lambda: |-
+            id(reiniciar_op).execute();
+    web_server:
+      sorting_group_id: general_stat
+      sorting_weight: 4
+
+script:
+  - id: buscheck
+    mode: queued
+    parameters:
+      #modes:
+      #1 Fires on boot and checks i2c(ads1115) and spi(max6675 only if the tmpmnt switch is on)
+      #2 Fires on a possible mid-run i2c(ads1115) fault. sensor ok>fault>trigger timeout filter>publish NaN>trigger on_value>trigger this script in mode 2
+      #3: Only fires when the tmpmnt switch turns ON or fault in a mid-run, following the same pattern above but for spi(max6675) ps: the max6675 may also publish NAN or 0.0C temp on a fault and we cover with this val == 0xFFFF || val == 0x0000
+      mode: int
+    then:
+      - lambda: |-
+          bool ads1115_fault = id(ads1115_0).is_failed() || id(ads1115_0).status_has_warning();
+          uint32_t prev = id(error_mask);
+
+          if (mode == 1) {
+            if (ads1115_fault) {
+              if (!bool(prev & 0x02)) id(error_mask) |= 0x02;
+              lv_label_set_text(id(popup_ads_label_idle), "ADC: err");
+            }
+            if (id(tmpmnt).state) {
+              id(tempsens).enable();
+              uint16_t val = (id(tempsens).read_byte() << 8) | id(tempsens).read_byte();
+              id(tempsens).disable();
+              //ESP_LOGD("max6675", "raw = 0x%04X", val);
+
+              bool missing = (val == 0xFFFF || val == 0x0000);
+              if (missing != bool(prev & 0x100)) {
+                if (missing) id(error_mask) |= 0x100;
+                else id(error_mask) &= ~0x100;
+              }
+              if (!missing) {
+                bool open_tc = (val & 0x04) != 0;
+                if (open_tc && !bool(prev & 0x200)) {
+                  id(error_mask) |= 0x200;
+                }
+              }
+            }
+          } else if (mode == 2) {
+            if (ads1115_fault && !bool(prev & 0x02)) {
+              id(error_mask) |= 0x02;
+              lv_label_set_text(id(popup_ads_label_idle), "ADC: err");
+            }
+          } else if (mode == 3) {
+            id(tempsens).enable();
+            uint16_t val = (id(tempsens).read_byte() << 8) | id(tempsens).read_byte();
+            id(tempsens).disable();
+            //ESP_LOGD("max6675", "raw = 0x%04X", val);
+
+            bool missing = (val == 0xFFFF || val == 0x0000);
+            if (missing != bool(prev & 0x100)) {
+              if (missing) id(error_mask) |= 0x100;
+              else id(error_mask) &= ~0x100;
+            }
+            if (!missing) {
+              bool open_tc = (val & 0x04) != 0;
+              if (open_tc && !bool(prev & 0x200)) {
+                id(error_mask) |= 0x200;
+              }
+            }
+          }
+          id(statuschecker).update();
+
+
+  - id: flw_opn_chck
+    mode: restart
+    then:
+      - delay: !lambda 'return (id(flowswtime).state) * 1000;'
+      - lambda: |-
+          if (id(_glbl_timeout_ticks) == 0 && id(flowswitchbn).state && !id(bombatmpt).state) {
+            id(error_mask) |= 0x10;
+            id(statuschecker).update();
+          }
+
+  - id: reiniciar_op
+    mode: single
+    then:
+      - lambda: |-
+          lv_obj_clear_flag(id(popup_rstop), LV_OBJ_FLAG_HIDDEN);
+      - delay: 2s
+      - lambda: |-
+          id(error_mask) &= ~0x01; //pump exceded runtime
+          id(error_mask) &= ~0x08; //no water or flowswitch stuck closed
+          id(error_mask) &= ~0x10; //flowswitch stuck open
+
+          id(tempsens).enable();
+          uint16_t val = (id(tempsens).read_byte() << 8) | id(tempsens).read_byte();
+          id(tempsens).disable();
+
+          bool ads1115_fault = id(ads1115_0).is_failed() || id(ads1115_0).status_has_warning();
+          float trnsdval = id(raw_adsA0).state;
+          bool transducer_fault = trnsdval == 0.0f || trnsdval < (id(cal_x1).state * 0.85);
+          bool missing = (val == 0xFFFF || val == 0x0000);
+          bool open_tc = !missing && (val & 0x04);
+          bool htemp = id(tempsens).state >= (id(pump_maxtmp).state * 0.90);
+
+          if (ads1115_fault) {
+            id(error_mask) |= 0x02;
+          } else {
+            id(error_mask) &= ~0x02;
+          }
+
+          if (transducer_fault) {
+            id(error_mask) |= 0x04;
+          } else {
+            id(error_mask) &= ~0x04;
+          }
+
+          if (id(tmpmnt).state) {
+            if (missing) {
+              id(error_mask) |= 0x100;
+            } else {
+              id(error_mask) &= ~0x100;
+            }
+
+            if (open_tc) {
+              id(error_mask) |= 0x200;
+            } else {
+              id(error_mask) &= ~0x200;
+            }
+
+            if (htemp) {
+              id(error_mask) |= 0x40;
+            } else {
+              id(error_mask) &= ~0x40;
+            }
+          }
+
+          id(statuschecker).update();
+          lv_obj_add_flag(id(popup_rstop), LV_OBJ_FLAG_HIDDEN);
+
+  - id: _timer_tick
+    # Start a new run after previous runs completes. This will happen until switch turn off or error_mask != 0
+    mode: queued
+    then:
+      # A single 'tick' is 1 second long
+      - delay: 1s
+      - lambda: |-
+          id(flw_opn_chck).stop();
+          id(_glbl_timeout_ticks) += 1;
+
+          // Error guard
+          if (id(error_mask) != 0 || !id(pumprelay).state) {
+            id(_timer_tick).stop();
+            id(_glbl_timeout_ticks) = 0;
+            return;
+          }
+
+          // Check pump overtime
+          if (id(_glbl_timeout_ticks) >= id(pump_time).state) {
+            id(error_mask) |= 0x01;
+            id(statuschecker).update();
+            id(_timer_tick).stop();
+            id(_glbl_timeout_ticks) = 0;
+            return;
+          }
+
+          // Check flowswitch fault
+          if (id(flxmnt).state) {
+            if (id(_glbl_timeout_ticks) >= id(flowswtime).state && id(bombatmpt).state && !id(flowswitchbn).state) {
+              id(error_mask) |= 0x08;
+              id(statuschecker).update();
+              id(_timer_tick).stop();
+              id(_glbl_timeout_ticks) = 0;
+              return;
+            }
+          }
+
+          // No faults — reschedule
+          id(_timer_tick).execute();
+
+
