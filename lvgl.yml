@@ -28,7 +28,7 @@ substitutions:
   label_pause: "Pausar Controlador"
   label_brightness: "Brilho do Display"
   label_qrcode: "Manual"
-  qrlink: "https://github.com/kanagawawave/pressurecontrol/blob/main/INST.md"
+  qrlink: "https://github.com/kanagawawave/presscontrol/blob/main/INST.md"
   label_restart: "Reiniciar"
   label_factory: "Resetaurar Cfg"
 
