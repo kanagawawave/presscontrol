@@ -241,7 +241,8 @@ binary_sensor:
         then:
           - lambda: |-
               if (id(popup_active) && (id(selected_control_index) == 8 || id(selected_control_index) == 10)) {
-                if (id(ads1115_0).is_failed() || id(ads1115_0).status_has_warning() || id(raw_adsA0).state <= 0.0f || id(raw_adsA0).state < (id(cal_x1).state * 0.85)) {
+                // check for ads115 and transducer failures before copying (0x04 and 0x02)
+                if (id(error_mask) & 0x06) {
                   id(copy_text).execute(2);
                   return;
                 }
