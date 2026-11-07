@@ -1,0 +1,1569 @@
+substitutions:
+  dclk_pin: "GPIO12" #SCL display
+  dmosi_pin: "GPIO11" #SDA display
+  dreset_pin: "GPIO13" #RES display
+  ddc_pin: "GPIO10" #DC display
+  #wire CS display pin to ground
+  doutput_pin: "GPIO14" #BLK display ATTENTION: PIN14 on N16R8 is close to 5v, doublecheck to not wire wrong
+  rencpin_a: "GPIO4" #TRA display ATTENTION: PIN4 on N16R8 is close to rst, doublecheck to not wire wrong
+  rencpin_b: "GPIO5" #TRB display
+  rencbutton_pin: "GPIO6" #PSH display
+  dbtn_pin: "GPIO7" #K0 display
+  idletime: "180" #seconds to disable lvgl
+  label_title: "Menu (v0.1)"
+  label_flowsw: "Mnt. Fluxostato"
+  label_temp: "Mnt. Temperatura"
+  label_start_press: "Pressão Acio."
+  label_stop_press: "Pressão Para."
+  label_max_temp: "Temperatura Máx."
+  label_max_pump_time: "Tempo Máx. Bomba"
+  label_flowsw_time: "Tempo Lim. Flux"
+  label_calx1: "Cal X1(V)"
+  label_caly1: "Cal Y1(P)"
+  label_calx2: "Cal X2(V)"
+  label_caly2: "Cal Y2(P)"
+  label_relay_test: "Teste Relay"
+  label_wifi: "WIFI"
+  label_oprmode: "Modo Opr."
+  label_pause: "Pausar Controlador"
+  label_brightness: "Brilho do Display"
+  label_qrcode: "Manual"
+  qrlink: "https://github.com/kanagawawave/pressurecontrol/blob/main/INST.md"
+  label_restart: "Reiniciar"
+  label_factory: "Resetaurar Cfg"
+
+globals:
+  - id: selected_control_index
+    type: int
+    restore_value: no
+    initial_value: "1"
+
+  - id: control_menu_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: control_menu_cursor
+    type: int
+    restore_value: no
+    initial_value: "1"
+
+  - id: control_menu_turn_halfstep
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: mainscreen_halfstep
+    type: bool
+    restore_value: no
+    initial_value: "true"
+
+  - id: popup_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: ota_err
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+sensor:
+  - platform: rotary_encoder
+    id: renc
+    name: "REnc"
+    restore_mode: ALWAYS_ZERO
+    internal: true
+    pin_a:
+      number: ${rencpin_a}
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: ${rencpin_b}
+      mode:
+        input: true
+        pullup: true
+    resolution: 2
+    on_clockwise:
+      - script.execute: rotary_cw
+    on_anticlockwise:
+      - script.execute: rotary_ccw
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 5
+
+font:
+  - file: "fonts/Nunito-SemiBold.ttf" #Get font https://fonts.google.com/specimen/Nunito
+    id: nunito15
+    size: 15
+    glyphsets:
+      - GF_Latin_Core
+
+  - file: "fonts/materialdesignicons-webfont.ttf" #https://github.com/Templarian/MaterialDesign-Webfont/blob/master/fonts/materialdesignicons-webfont.ttf
+    id: mdi_20
+    size: 20
+    bpp: 4
+    glyphs: [
+      "\U000F0504", # celsius icon
+      "\U000F0026", # warning icon
+      "\U000F0928", # wifi signal from 100%
+      ]
+
+binary_sensor:
+  - platform: gpio
+    id: rencbtn
+    name: "REnc Button"
+    internal: true
+    pin:
+      number: ${rencbutton_pin}
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on_off: 20ms
+    on_multi_click:
+      # short press: select a menu item, or toggle the popup open/closed
+      - timing:
+          - ON for at most 300ms
+          - OFF for at least 50ms
+        then:
+          - lambda: |-
+              lv_display_trigger_activity(NULL);
+          - if:
+              condition:
+                lvgl.is_paused
+              then:
+                - light.turn_on: display_backlight
+              else:
+                - if:
+                    condition:
+                      - lambda: 'return id(ota_err);'
+                    then:
+                      - lambda: |-
+                          id(ota_err) = false;
+                          lv_obj_add_flag(id(ota_widget), LV_OBJ_FLAG_HIDDEN);
+                    else:
+                      - lambda: |-
+                          if (id(control_menu_active)) {
+                            id(select_control_menu_item).execute();
+                          } else if (id(popup_active) && (id(selected_control_index) >= 3 && id(selected_control_index) <= 11)) {
+                            auto s = id(popup_spinbox_idle);
+                            if (lv_spinbox_get_step(s) > 1)
+                              lv_spinbox_step_next(s);
+                            else
+                              lv_spinbox_set_cursor_pos(s, lv_spinbox_get_digit_count(s) - 1);
+                          } else if (id(popup_active) && (id(selected_control_index) == 18 || id(selected_control_index) == 19)) {
+                            if (lv_obj_has_state(id(confirm_label_box), LV_STATE_FOCUSED)) {
+                              lv_obj_send_event(id(confirm_label_box), LV_EVENT_CLICKED, NULL);
+                            } else {
+                              lv_obj_send_event(id(cancel_label_box), LV_EVENT_CLICKED, NULL);
+                            }
+                          } else if (id(popup_active)) {
+                            id(hide_popup).execute();
+                          }
+
+      # long press: open the menu, or close it / close the popup if already open
+      - timing:
+          - ON for at least 700ms
+        then:
+          - lambda: |-
+              lv_display_trigger_activity(NULL);
+          - if:
+              condition:
+                lvgl.is_paused
+              then:
+                - light.turn_on: display_backlight
+              else:
+                - if:
+                    condition:
+                      - lambda: 'return id(ota_err);'
+                    then:
+                      - lambda: |-
+                          id(ota_err) = false;
+                          lv_obj_add_flag(id(ota_widget), LV_OBJ_FLAG_HIDDEN);
+                    else:
+                      - if:
+                          condition:
+                            lvgl.page.is_showing: main_page
+                          then:
+                            - lambda: |-
+                                if (id(popup_active)) {
+                                  id(hide_popup).execute();
+                                } else if (id(control_menu_active)) {
+                                  id(hide_control_menu).execute();
+                                } else {
+                                  id(show_control_menu).execute();
+                                }
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 7
+
+  - platform: gpio
+    id: dbtn
+    name: "KEY 0"
+    internal: true
+    pin:
+      number: ${dbtn_pin}
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on_off: 20ms
+    on_multi_click:
+      # short press: select a menu item, or toggle the popup open/closed
+      - timing:
+          - ON for at most 300ms
+          - OFF for at least 50ms
+        then:
+          - lambda: |-
+              lv_display_trigger_activity(NULL);
+          - if:
+              condition:
+                lvgl.is_paused
+              then:
+                - light.turn_on: display_backlight
+              else:
+                - if:
+                    condition:
+                      - lambda: 'return id(ota_err);'
+                    then:
+                      - lambda: |-
+                          id(ota_err) = false;
+                          lv_obj_add_flag(id(ota_widget), LV_OBJ_FLAG_HIDDEN);
+      - timing:
+          - ON for at least 2s
+        then:
+          - button.press: restartop
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 1s
+          - ON for at most 1s
+          - OFF for at least 0.2s
+        then:
+          - lambda: |-
+              if (id(popup_active) && (id(selected_control_index) == 8 || id(selected_control_index) == 10)) {
+                if (id(ads1115_0).is_failed() || id(ads1115_0).status_has_warning() || id(raw_adsA0).state <= 0.0f) {
+                  id(copy_text).execute(2);
+                  return;
+                }
+                lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(raw_adsA0).state * 100));
+                float v = lv_spinbox_get_value(id(popup_spinbox_idle)) / 100.0f;
+                if (id(selected_control_index) == 8) {
+                  id(cal_x1).make_call().set_value(v).perform();
+                  id(copy_text).execute(1);
+                } else {
+                  id(cal_x2).make_call().set_value(v).perform();
+                  id(copy_text).execute(1);
+                }
+              }
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 6
+
+script:
+  - id: rotary_cw
+    mode: restart
+    then:
+      - script.execute:
+          id: handle_rotary_turn
+          direction: 1
+
+  - id: rotary_ccw
+    mode: restart
+    then:
+      - script.execute:
+          id: handle_rotary_turn
+          direction: -1
+
+  - id: handle_rotary_turn
+    mode: restart
+    parameters:
+      direction: int
+    then:
+      - lambda: |-
+          lv_display_trigger_activity(NULL);
+      - if:
+          condition:
+            lvgl.is_paused
+          then:
+            - light.turn_on: display_backlight
+          else:
+            - if:
+                condition:
+                  - lambda: 'return id(ota_err);'
+                then:
+                  - lambda: |-
+                      id(ota_err) = false;
+                      lv_obj_add_flag(id(ota_widget), LV_OBJ_FLAG_HIDDEN);
+                else:
+                  - if:
+                      condition:
+                        and:
+                          - lvgl.page.is_showing: main_page
+                          - lambda: 'return !id(control_menu_active) && !id(popup_active);'
+                      then:
+                        - lambda: |-
+                            if (id(mainscreen_halfstep)) {
+                              int32_t scroll_y = lv_obj_get_scroll_y(id(info_widget));
+                              int32_t scroll_bottom = lv_obj_get_scroll_bottom(id(info_widget));
+                              if (direction > 0 && scroll_bottom <= 0) {
+                                lv_obj_scroll_to_y(id(info_widget), 0, LV_ANIM_OFF);
+                              } else if (direction < 0 && scroll_y <= 0) {
+                                lv_obj_scroll_to_y(id(info_widget), scroll_y + scroll_bottom, LV_ANIM_OFF);
+                              } else {
+                                lv_obj_scroll_by(id(info_widget), 0, direction * -15, LV_ANIM_ON);
+                              }
+                            }
+                            id(mainscreen_halfstep) = !id(mainscreen_halfstep);
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(control_menu_active);'
+                            then:
+                              - lambda: |-
+                                  if (id(control_menu_turn_halfstep)) {
+                                    id(control_menu_cursor) += direction;
+                                    if (id(control_menu_cursor) > 19) id(control_menu_cursor) = 1;
+                                    if (id(control_menu_cursor) < 1) id(control_menu_cursor) = 19;
+                                  }
+                                  while ((id(control_menu_cursor) == 1 && id(opr_mode).state) || (id(control_menu_cursor) == 5 && !id(tmpmnt).state)) {
+                                    id(control_menu_cursor) += direction;
+                                    if (id(control_menu_cursor) > 19) id(control_menu_cursor) = 1;
+                                    if (id(control_menu_cursor) < 1) id(control_menu_cursor) = 19;
+                                  }
+                                  id(control_menu_turn_halfstep) = !id(control_menu_turn_halfstep);
+                              - script.execute: render_control_menu
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(popup_active);'
+                                  then:
+                                    - script.execute:
+                                        id: adjust_popup_value
+                                        direction: direction
+
+  - id: adjust_popup_value
+    mode: restart
+    parameters:
+      direction: int
+    then:
+      - lambda: |-
+          if (id(control_menu_turn_halfstep)) {
+            switch (id(selected_control_index)) {
+              case 1:
+                id(flxmnt).toggle();
+                break;
+              case 2:
+                id(tmpmnt).toggle();
+                break;
+              case 3:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle)) / 10.0f;
+                  id(lowpressure).make_call().set_value(v).perform();
+                }
+                break;
+              case 4:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle)) / 10.0f;
+                  id(highpressure).make_call().set_value(v).perform();
+                }
+                break;
+              case 5:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle));
+                  id(pump_maxtmp).make_call().set_value(v).perform();
+                }
+                break;
+              case 6:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle));
+                  id(pump_time).make_call().set_value(v).perform();
+                }
+                break;
+              case 7:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle));
+                  id(flowswtime).make_call().set_value(v).perform();
+                }
+                break;
+              case 8:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle)) / 100.0f;
+                  id(cal_x1).make_call().set_value(v).perform();
+                }
+                break;
+              case 9:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle)) / 100.0f;
+                  id(cal_y1).make_call().set_value(v).perform();
+                }
+                break;
+              case 10:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle)) / 100.0f;
+                  id(cal_x2).make_call().set_value(v).perform();
+                }
+                break;
+              case 11:
+                if (direction > 0) {
+                  lv_spinbox_increment(id(popup_spinbox_idle));
+                } else {
+                  lv_spinbox_decrement(id(popup_spinbox_idle));
+                }
+                {
+                  float v = lv_spinbox_get_value(id(popup_spinbox_idle)) / 100.0f;
+                  id(cal_y2).make_call().set_value(v).perform();
+                }
+                break;
+              case 12:
+                id(test_relay).execute();
+                break;
+              case 13:
+                id(wifisw).toggle();
+                break;
+              case 14:
+                id(opr_mode).toggle();
+                break;
+              case 15:
+                id(pausectr).toggle();
+                break;
+              case 16:
+                if (direction > 0) {
+                  lv_slider_set_value(id(popup_slider_idle), lv_slider_get_value(id(popup_slider_idle)) + 10, LV_ANIM_OFF);
+                } else {
+                  lv_slider_set_value(id(popup_slider_idle), lv_slider_get_value(id(popup_slider_idle)) - 10, LV_ANIM_OFF);
+                }
+                {
+                  float v = lv_slider_get_value(id(popup_slider_idle)) / 100.0f;
+                  id(display_backlight).turn_on().set_brightness(v).perform();
+                }
+                break;
+              case 17:
+                id(hide_popup).execute();
+                break;
+              case 18:
+              case 19:
+                if (lv_obj_has_state(id(cancel_label_box), LV_STATE_FOCUSED)) {
+                  lv_obj_clear_state(id(cancel_label_box), LV_STATE_FOCUSED);
+                  lv_obj_add_state(id(confirm_label_box), LV_STATE_FOCUSED);
+                } else {
+                  lv_obj_clear_state(id(confirm_label_box), LV_STATE_FOCUSED);
+                  lv_obj_add_state(id(cancel_label_box), LV_STATE_FOCUSED);
+                }
+                break;
+            }
+          }
+          id(control_menu_turn_halfstep) = !id(control_menu_turn_halfstep);
+
+  - id: show_control_menu
+    mode: restart
+    then:
+      - lambda: |-
+          id(control_menu_active) = true;
+          if (id(selected_control_index) < 1 || id(selected_control_index) > 19) {
+            id(selected_control_index) = 1;
+          }
+          // skip to next item if the opr_mode is air
+          if (id(selected_control_index) == 1 && id(opr_mode).state) {
+            id(selected_control_index) = 2;
+          }
+          id(control_menu_cursor) = id(selected_control_index);
+          id(control_menu_turn_halfstep) = true;
+
+      - script.execute: render_control_menu
+
+  - id: render_control_menu
+    mode: restart
+    then:
+      - lambda: |-
+          const char *labels[19] = {
+            "${label_flowsw}",
+            "${label_temp}",
+            "${label_start_press}",
+            "${label_stop_press}",
+            "${label_max_temp}",
+            "${label_max_pump_time}",
+            "${label_flowsw_time}",
+            "${label_calx1}",
+            "${label_caly1}",
+            "${label_calx2}",
+            "${label_caly2}",
+            "${label_relay_test}",
+            "${label_wifi}",
+            "${label_oprmode}",
+            "${label_pause}",
+            "${label_brightness}",
+            "${label_qrcode}",
+            "${label_restart}",
+            "${label_factory}",
+          };
+          lv_obj_t *idle_items[19] = {
+            id(control_menu_idle_item_1),
+            id(control_menu_idle_item_2),
+            id(control_menu_idle_item_3),
+            id(control_menu_idle_item_4),
+            id(control_menu_idle_item_5),
+            id(control_menu_idle_item_6),
+            id(control_menu_idle_item_7),
+            id(control_menu_idle_item_8),
+            id(control_menu_idle_item_9),
+            id(control_menu_idle_item_10),
+            id(control_menu_idle_item_11),
+            id(control_menu_idle_item_12),
+            id(control_menu_idle_item_13),
+            id(control_menu_idle_item_14),
+            id(control_menu_idle_item_15),
+            id(control_menu_idle_item_16),
+            id(control_menu_idle_item_17),
+            id(control_menu_idle_item_18),
+            id(control_menu_idle_item_19),
+          };
+
+          int visible_row = 0;
+          for (int i = 0; i < 19; i++) {
+            const bool selected = ((i + 1) == id(control_menu_cursor));
+            char item_text[64];
+
+            if ((i == 0 && id(opr_mode).state) || (i == 4 && !id(tmpmnt).state)) {
+              // case 1: hide entirely when opr_mode/tmpmnt is ON
+              lv_obj_add_flag(idle_items[i], LV_OBJ_FLAG_HIDDEN);
+              continue;
+            } else {
+              lv_obj_clear_flag(idle_items[i], LV_OBJ_FLAG_HIDDEN);
+            }
+
+            lv_obj_set_y(idle_items[i], visible_row * 28);
+
+            visible_row++;
+
+            if (i == 5 && id(opr_mode).state) {
+              // case 6: renamed label when opr_mode/tmpmnt is ON
+              snprintf(item_text, sizeof(item_text), "  Tempo Máx Motor");
+            } else {
+              snprintf(item_text, sizeof(item_text), "  %s", labels[i]);
+            }
+
+            lv_label_set_text(idle_items[i], item_text);
+
+            if (selected) {
+              lv_obj_set_style_bg_color(idle_items[i], lv_color_hex(0x66CCFF), LV_PART_MAIN);
+              lv_obj_set_style_bg_opa(idle_items[i], LV_OPA_COVER, LV_PART_MAIN);
+              lv_obj_set_style_text_color(idle_items[i], lv_color_hex(0x000000), LV_PART_MAIN);
+              lv_obj_set_style_radius(idle_items[i], 6, LV_PART_MAIN);
+            } else {
+              lv_obj_set_style_bg_opa(idle_items[i], LV_OPA_TRANSP, LV_PART_MAIN);
+              lv_obj_set_style_text_color(idle_items[i], lv_color_hex(0x9BA2BC), LV_PART_MAIN);
+            }
+          }
+          lv_obj_scroll_to_view(idle_items[id(control_menu_cursor) - 1], LV_ANIM_OFF);
+      - lvgl.widget.show: control_menu_idle
+
+  - id: hide_control_menu
+    mode: restart
+    then:
+      - lambda: |-
+          id(control_menu_active) = false;
+          id(selected_control_index) = 1;
+      - lvgl.widget.hide: control_menu_idle
+
+  - id: select_control_menu_item
+    mode: restart
+    then:
+      - lvgl.widget.disable: control_menu_idle
+      - lambda: |-
+          if ((id(control_menu_cursor) == 1 && id(opr_mode).state) || (id(control_menu_cursor) == 5 && !id(tmpmnt).state)) return;
+          id(selected_control_index) = id(control_menu_cursor);
+      - script.execute: show_selected_control_popup
+      - lambda: |-
+          id(control_menu_active) = false;
+
+  - id: show_selected_control_popup
+    mode: restart
+    then:
+      - lambda: |-
+          id(popup_active) = true;
+          if (id(selected_control_index) < 1 || id(selected_control_index) > 19) {
+            id(selected_control_index) = 1;
+          }
+      - script.execute: render_popup
+      #- script.execute: popup_autoclose
+
+  - id: render_popup
+    mode: restart
+    then:
+      - lambda: |-
+          lv_obj_clear_flag(id(popup_idle), LV_OBJ_FLAG_HIDDEN);
+
+          if (id(selected_control_index) == 1) {
+            lv_obj_set_size(id(popup_idle), 160, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_left_msg), "OFF");
+            lv_label_set_text(id(popup_right_msg), "ON");
+            lv_obj_clear_flag(id(toggle_switch_1), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_flowsw}");
+
+          } else if (id(selected_control_index) == 2) {
+            lv_obj_set_size(id(popup_idle), 160, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_left_msg), "OFF");
+            lv_label_set_text(id(popup_right_msg), "ON");
+            lv_obj_clear_flag(id(toggle_switch_2), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_temp}");
+
+          } else if (id(selected_control_index) == 3) {
+            lv_obj_set_size(id(popup_idle), 230, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.2f Bar", id(lowpressure).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.2f Bar", id(lowpressure).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_start_press}");
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(lowpressure).traits.get_min_value() * 10), (int)round(id(lowpressure).traits.get_max_value() * 10));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 2, 1);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 1);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(lowpressure).state * 10));
+
+          } else if (id(selected_control_index) == 4) {
+            lv_obj_set_size(id(popup_idle), 230, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.2f Bar", id(highpressure).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.2f Bar", id(highpressure).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_stop_press}");
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(highpressure).traits.get_min_value() * 10), (int)round(id(highpressure).traits.get_max_value() * 10));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 2, 1);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 1);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(highpressure).state * 10));
+
+          } else if (id(selected_control_index) == 5) {
+            lv_obj_set_size(id(popup_idle), 230, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.0f°C", id(pump_maxtmp).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.0f°C", id(pump_maxtmp).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_max_temp}");
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(pump_maxtmp).traits.get_min_value()), (int)round(id(pump_maxtmp).traits.get_max_value()));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 2, 0);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 1);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(pump_maxtmp).state));
+
+          } else if (id(selected_control_index) == 6) {
+            lv_obj_set_size(id(popup_idle), 230, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.0f sec", id(pump_time).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.0f sec", id(pump_time).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_max_pump_time}");
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(pump_time).traits.get_min_value()), (int)round(id(pump_time).traits.get_max_value()));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 4, 0);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 3);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(pump_time).state));
+
+          } else if (id(selected_control_index) == 7) {
+            lv_obj_set_size(id(popup_idle), 230, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.0f sec", id(flowswtime).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.0f sec", id(flowswtime).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_flowsw_time}");
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(flowswtime).traits.get_min_value()), (int)round(id(flowswtime).traits.get_max_value()));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 2, 0);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 1);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(flowswtime).state));
+
+          } else if (id(selected_control_index) == 8) {
+            lv_obj_set_size(id(popup_idle), 230, 180);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.2fV", id(cal_x1).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.2fV", id(cal_x1).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_calx1}");
+            lv_obj_clear_flag(id(popup_ads_label_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(cal_x1).traits.get_min_value() * 100), (int)round(id(cal_x1).traits.get_max_value() * 100));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 4, 2);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 2);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(cal_x1).state * 100));
+
+          } else if (id(selected_control_index) == 9) {
+            lv_obj_set_size(id(popup_idle), 230, 180);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.2f Bar", id(cal_y1).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.2f Bar", id(cal_y1).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_caly1}");
+            lv_obj_clear_flag(id(popup_ads_label_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(cal_y1).traits.get_min_value() * 100), (int)round(id(cal_y1).traits.get_max_value() * 100));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 4, 2);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 2);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(cal_y1).state * 100));
+
+          } else if (id(selected_control_index) == 10) {
+            lv_obj_set_size(id(popup_idle), 230, 180);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.2fV", id(cal_x2).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.2fV", id(cal_x2).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_calx2}");
+            lv_obj_clear_flag(id(popup_ads_label_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(cal_x2).traits.get_min_value() * 100), (int)round(id(cal_x2).traits.get_max_value() * 100));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 4, 2);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 2);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(cal_x2).state * 100));
+
+          } else if (id(selected_control_index) == 11) {
+            lv_obj_set_size(id(popup_idle), 230, 180);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(id(popup_left_msg), "Min \n%.2f Bar", id(cal_y2).traits.get_min_value());
+            lv_label_set_text_fmt(id(popup_right_msg), "Max \n%.2f Bar", id(cal_y2).traits.get_max_value());
+            lv_obj_clear_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_caly2}");
+            lv_obj_clear_flag(id(popup_ads_label_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_spinbox_set_range(id(popup_spinbox_idle), (int)round(id(cal_y2).traits.get_min_value() * 100), (int)round(id(cal_y2).traits.get_max_value() * 100));
+            lv_spinbox_set_digit_format(id(popup_spinbox_idle), 4, 2);
+            lv_spinbox_set_cursor_pos(id(popup_spinbox_idle), 2);
+            lv_spinbox_set_value(id(popup_spinbox_idle), (int)round(id(cal_y2).state * 100));
+
+          } else if (id(selected_control_index) == 12) {
+            lv_obj_set_size(id(popup_idle), 160, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_left_msg), "OFF");
+            lv_label_set_text(id(popup_right_msg), "ON");
+            lv_obj_clear_flag(id(toggle_switch_3), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_relay_test}");
+
+          } else if (id(selected_control_index) == 13) {
+            lv_obj_set_size(id(popup_idle), 160, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_left_msg), "OFF");
+            lv_label_set_text(id(popup_right_msg), "ON");
+            lv_obj_clear_flag(id(toggle_switch_4), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_wifi}");
+
+          } else if (id(selected_control_index) == 14) {
+            lv_obj_set_size(id(popup_idle), 160, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_left_msg), "Água");
+            lv_label_set_text(id(popup_right_msg), "Ar");
+            lv_obj_clear_flag(id(toggle_switch_5), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_oprmode}");
+
+          } else if (id(selected_control_index) == 15) {
+            lv_obj_set_size(id(popup_idle), 230, 150);
+            lv_obj_clear_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_left_msg), "Ativar");
+            lv_label_set_text(id(popup_right_msg), "Pausar");
+            lv_obj_clear_flag(id(toggle_switch_6), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_pause}");
+
+          } else if (id(selected_control_index) == 16) {
+            lv_obj_set_size(id(popup_idle), 170, 160);
+            lv_obj_clear_flag(id(popup_slider_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(current_bright), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_brightness}");
+            lv_slider_set_value(id(popup_slider_idle), (int)round(id(display_backlight).remote_values.get_brightness() * 100), LV_ANIM_OFF);
+
+          } else if (id(selected_control_index) == 17) {
+            lv_obj_set_size(id(popup_idle), 230, 200);
+            lv_obj_clear_flag(id(popup_qrcode_idle), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(popup_title_idle), "${label_qrcode}");
+
+          } else if (id(selected_control_index) == 18 || id(selected_control_index) == 19) {
+            lv_obj_set_size(id(popup_idle), 230, 130);
+            lv_obj_clear_flag(id(confirm_label_box), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(cancel_label_box), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_state(id(confirm_label_box), LV_STATE_FOCUSED);
+            lv_obj_add_state(id(cancel_label_box), LV_STATE_FOCUSED);
+            if (id(selected_control_index) == 18) {
+              lv_label_set_text(id(popup_title_idle), "Reiniciar Controlador?");
+            } else {
+              lv_label_set_text(id(popup_title_idle), "Restaurar Configurações de Fábrica?");
+            }
+          }
+
+
+  - id: hide_popup
+    mode: restart
+    then:
+      #- script.stop: popup_autoclose
+      - lambda: |-
+          id(popup_active) = false;
+      - lambda: |-
+          lv_obj_add_flag(id(popup_idle), LV_OBJ_FLAG_HIDDEN);
+
+          if (id(selected_control_index) >= 1 && id(selected_control_index) <= 15) {
+            lv_obj_add_flag(id(popup_left_msg), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(id(popup_right_msg), LV_OBJ_FLAG_HIDDEN);
+          }
+
+          switch (id(selected_control_index)) {
+            case 1: lv_obj_add_flag(id(toggle_switch_1), LV_OBJ_FLAG_HIDDEN); break;
+            case 2: lv_obj_add_flag(id(toggle_switch_2), LV_OBJ_FLAG_HIDDEN); break;
+            case 3:
+            case 4:
+            case 5:
+            case 6:
+            case 7: lv_obj_add_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN); break;
+            case 8:
+            case 9:
+            case 10:
+            case 11: lv_obj_add_flag(id(popup_spinbox_idle), LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(id(popup_ads_label_idle), LV_OBJ_FLAG_HIDDEN); break;
+            case 12: lv_obj_add_flag(id(toggle_switch_3), LV_OBJ_FLAG_HIDDEN); break;
+            case 13: lv_obj_add_flag(id(toggle_switch_4), LV_OBJ_FLAG_HIDDEN); break;
+            case 14: lv_obj_add_flag(id(toggle_switch_5), LV_OBJ_FLAG_HIDDEN); break;
+            case 15: lv_obj_add_flag(id(toggle_switch_6), LV_OBJ_FLAG_HIDDEN); break;
+            case 16: lv_obj_add_flag(id(popup_slider_idle), LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(id(current_bright), LV_OBJ_FLAG_HIDDEN); break;
+            case 17: lv_obj_add_flag(id(popup_qrcode_idle), LV_OBJ_FLAG_HIDDEN); break;
+            case 18:
+            case 19: lv_obj_add_flag(id(confirm_label_box), LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(id(cancel_label_box), LV_OBJ_FLAG_HIDDEN); break;
+          }
+      - lambda: |-
+          id(control_menu_active) = true;
+      - lvgl.widget.enable: control_menu_idle
+
+  - id: test_relay
+    mode: restart
+    then:
+      - switch.turn_on: pumprelay
+      - delay: 5s
+      - switch.turn_off: pumprelay
+
+  - id: copy_text
+    mode: single
+    parameters:
+      mode: int
+    then:
+      - lambda: |-
+          lv_label_set_text(id(popup_copy_idle), mode == 1 ? "Copiado!" : "copy ERR");
+          lv_obj_set_style_text_color(id(popup_copy_idle), lv_color_hex(mode == 1 ? 0xFFFF00 : 0xFF1100), LV_PART_MAIN);
+          lv_obj_clear_flag(id(popup_copy_idle), LV_OBJ_FLAG_HIDDEN);
+      - delay: 2s
+      - lambda: 'lv_obj_add_flag(id(popup_copy_idle), LV_OBJ_FLAG_HIDDEN);'
+
+
+spi:
+  - id: bus_tft
+    clk_pin: ${dclk_pin}
+    mosi_pin: ${dmosi_pin}
+
+output:
+  - platform: ledc
+    pin: ${doutput_pin}
+    id: backlight_output
+    inverted: false
+
+light:
+  - platform: monochromatic
+    id: "display_backlight"
+    name: Display Backlight
+    output: backlight_output
+    restore_mode: RESTORE_AND_ON
+    internal: true
+    initial_state:
+      brightness: 60%
+    default_transition_length: 150ms
+    on_state:
+      then:
+        - lambda: |-
+            lv_label_set_text_fmt(id(current_bright), "%d%%", (int)round(id(display_backlight).remote_values.get_brightness() * 100));
+            if (id(selected_control_index) == 15 && id(popup_active)) {
+              lv_slider_set_value(id(popup_slider_idle), (int)round(id(display_backlight).remote_values.get_brightness() * 100), LV_ANIM_ON);
+            }
+    on_turn_on:
+      then:
+        - lvgl.resume:
+        - lvgl.widget.redraw:
+    on_turn_off:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(popup_active);'
+            then:
+              - script.execute: hide_popup
+        - if:
+            condition:
+              lambda: 'return id(control_menu_active);'
+            then:
+              - script.execute: hide_control_menu
+    web_server:
+      sorting_group_id: lowlevel
+      sorting_weight: 8
+
+display:
+  - platform: mipi_spi
+    spi_id: bus_tft
+    id: dsp0
+    model: ST7789V
+    data_rate: 40MHz
+    spi_mode: MODE3
+    dc_pin: ${ddc_pin}
+    reset_pin: ${dreset_pin}
+    show_test_card: false
+    invert_colors: true
+    auto_clear_enabled: false
+    update_interval: never
+    dimensions:
+      width: 240
+      height: 320
+
+lvgl:
+  id: lvgl_id
+  displays:
+    - dsp0
+  rotation: 270
+  buffer_size: 12%
+  color_depth: 16
+  default_font: nunito15
+  on_idle:
+    timeout: !lambda "return (${idletime} * 1000);"
+    then:
+      - light.turn_off: display_backlight
+      - lvgl.pause:
+          show_snow: true
+
+  theme:
+    label:
+      text_color: 0x9BA2BC
+
+  top_layer:
+    widgets:
+      - obj:
+            id: popup_rstop
+            hidden: true
+            align: CENTER
+            radius: 18
+            pad_top: 12
+            pad_bottom: 12
+            pad_left: 10
+            pad_right: 10
+            scrollable: false
+            bg_color: 0x0d0d0d
+            bg_opa: COVER
+            border_color: 0x66CCFF
+            border_width: 2
+            widgets:
+              - label:
+                  id: rst_title
+                  align: BOTTOM_MID
+                  y: 0
+                  width: 100
+                  text_align: CENTER
+                  text: "Verificando Erros..."
+              - spinner:
+                  id: rstop_spiner
+                  width: 50
+                  height: 50
+                  align: TOP_MID
+                  spin_time: 2s
+                  arc_length: 60deg
+                  arc_width: 5
+                  arc_color: 0x606682
+                  indicator:
+                    arc_color: 0x9BA2BC
+                    arc_width: 5
+      - obj:
+          id: ota_widget
+          hidden: true
+          width: 320
+          height: 240
+          align: center
+          clickable: false
+          bg_color: 0x0d0d0d
+          border_opa: transp
+          shadow_opa: transp
+          radius: 0
+          widgets:
+            - label:
+                id: ota_label_primary
+                y: -50
+                align: center
+                text: "..."
+            - label:
+                id: ota_label_secondary
+                y: -20
+                align: center
+                text: "..."
+            - bar:
+                id: ota_bar_value
+                y: 20
+                width: 280
+                value: 0
+                align: center
+                min_value: 0
+                max_value: 100
+                animated: true
+                bg_color: 0x606682
+                indicator:
+                  bg_color: 0x9BA2BC
+
+  pages:
+    - id: main_page
+      widgets:
+        - obj:
+            id: info_widget
+            width: 320
+            height: 240
+            align: top_mid
+            bg_color: 0x0d0d0d
+            radius: 0
+            border_width: 0
+            layout:
+              type: flex
+              flex_flow: COLUMN
+              pad_row: 4
+            scrollable: true
+            scroll_dir: VER
+            widgets:
+              - obj:
+                  id: row_title
+                  width: 280
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x444444
+                  border_opa: COVER
+                  radius: 4
+                  pad_all: 2
+                  layout:
+                    type: flex
+                    flex_flow: ROW_WRAP
+                    flex_align_main: SPACE_BETWEEN
+                    pad_row: 2
+                  widgets:
+                    - label:
+                        id: temp_status
+                        text: "\U000F0504"
+                        text_color: 0x333333
+                        text_font: mdi_20
+                    - label:
+                        id: warn_status
+                        text: "\U000F0026" #warn icon
+                        text_color: 0x333333
+                        text_font: mdi_20
+                    - label:
+                        id: wifi_status
+                        text: "\U000F0928" #wifi icon 100%
+                        text_color: 0x333333
+                        text_font: mdi_20
+              - obj:
+                  id: row_status
+                  width: 280
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x444444
+                  border_opa: COVER
+                  radius: 4
+                  pad_all: 2
+                  layout:
+                    type: flex
+                    flex_flow: ROW_WRAP
+                    flex_align_main: SPACE_BETWEEN
+                    pad_row: 2
+                  widgets:
+                    - label:
+                        id: text_info_label
+                        text: "Diagnóstico:"
+                    - label:
+                        id: text_info_state
+                        long_mode: WRAP
+                        text: "..."
+                        text_align: LEFT
+
+              - obj:
+                  id: row_func
+                  width: 280
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x444444
+                  border_opa: COVER
+                  radius: 4
+                  pad_all: 2
+                  widgets:
+                    - label:
+                        id: func_info_label
+                        align: LEFT_MID
+                        text: "..."
+                    - switch:
+                        id: func_info_state
+                        width: 30
+                        height: 15
+                        align: RIGHT_MID
+
+              - obj:
+                  id: row_pressure
+                  width: 280
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x444444
+                  border_opa: COVER
+                  radius: 4
+                  pad_all: 2
+                  layout:
+                    type: flex
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                  widgets:
+                    - label:
+                        id: pressurebar_info_label
+                        text: "Pressão:"
+                    - label:
+                        id: pressure_info_state
+                        text: "..."
+
+              - obj:
+                  id: row_adc
+                  width: 280
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x444444
+                  border_opa: COVER
+                  radius: 4
+                  pad_all: 2
+                  widgets:
+                    - label:
+                        id: adc_info_label
+                        align: TOP_LEFT
+                        text: "Valor ADC:"
+                    - label:
+                        id: adc_info_state
+                        align: TOP_RIGHT
+                        text: "..."
+
+              - obj:
+                  id: row_aci
+                  width: 280
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x444444
+                  border_opa: COVER
+                  radius: 4
+                  pad_all: 2
+                  layout:
+                    type: flex
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                  widgets:
+                    - label:
+                        id: aci_info_label
+                        text: "Aci/Para:"
+                    - label:
+                        id: aci_info_state
+                        text: "..."
+                    - label:
+                        id: par_info_state
+                        text: "..."
+
+              - obj:
+                  id: row_wciclo
+                  width: 280
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 1
+                  border_color: 0x444444
+                  border_opa: COVER
+                  radius: 4
+                  pad_all: 2
+                  layout:
+                    type: flex
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                  widgets:
+                    - label:
+                        id: wtime_info_label
+                        align: TOP_LEFT
+                        text: "Tempo de Trabalho:"
+                    - label:
+                        id: ttime_info_state
+                        align: TOP_RIGHT
+                        text: "..."
+                    - label:
+                        id: ltime_info_state
+                        align: TOP_RIGHT
+                        text: "..."
+
+        - obj:
+            id: control_menu_idle
+            hidden: true
+            align: CENTER
+            width: 220
+            height: 230
+            radius: 18
+            pad_top: 12
+            pad_bottom: 8
+            pad_left: 12
+            pad_right: 12
+            scrollable: false
+            bg_color: 0x0d0d0d
+            bg_opa: COVER
+            border_color: 0x66CCFF
+            border_width: 2
+            widgets:
+              - label:
+                  align: TOP_MID
+                  y: 0
+                  width: 196
+                  text: "${label_title}"
+                  text_color: 0xFFFF00
+                  text_align: CENTER
+
+              - obj:
+                  id: control_menu_list
+                  align: TOP_MID
+                  y: 30
+                  width: 196
+                  height: 160
+                  pad_left: 0
+                  pad_right: 14
+                  pad_top: 0
+                  pad_bottom: 0
+                  border_width: 0
+                  bg_opa: TRANSP
+                  scrollable: true
+                  scroll_dir: VER
+                  widgets:
+                    - label:
+                        id: control_menu_idle_item_1
+                        align: TOP_LEFT
+                        y: 0
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_2
+                        align: TOP_LEFT
+                        y: 28
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_3
+                        align: TOP_LEFT
+                        y: 56
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_4
+                        align: TOP_LEFT
+                        y: 84
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_5
+                        align: TOP_LEFT
+                        y: 112
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_6
+                        align: TOP_LEFT
+                        y: 140
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_7
+                        align: TOP_LEFT
+                        y: 168
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_8
+                        align: TOP_LEFT
+                        y: 196
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_9
+                        align: TOP_LEFT
+                        y: 224
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_10
+                        align: TOP_LEFT
+                        y: 252
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_11
+                        align: TOP_LEFT
+                        y: 280
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_12
+                        align: TOP_LEFT
+                        y: 308
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_13
+                        align: TOP_LEFT
+                        y: 336
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_14
+                        align: TOP_LEFT
+                        y: 364
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_15
+                        align: TOP_LEFT
+                        y: 392
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_16
+                        align: TOP_LEFT
+                        y: 426
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_17
+                        align: TOP_LEFT
+                        y: 454
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_18
+                        align: TOP_LEFT
+                        y: 482
+                        width: 180
+
+                    - label:
+                        id: control_menu_idle_item_19
+                        align: TOP_LEFT
+                        y: 510
+                        width: 180
+
+        - obj:
+            id: popup_idle
+            hidden: true
+            align: CENTER
+            radius: 18
+            pad_top: 12
+            pad_bottom: 12
+            pad_left: 10
+            pad_right: 10
+            scrollable: false
+            bg_color: 0x0d0d0d
+            bg_opa: COVER
+            border_color: 0x66CCFF
+            border_width: 2
+            widgets:
+              - label:
+                  id: popup_title_idle
+                  align: TOP_MID
+                  y: 0
+                  width: 100
+                  text_align: CENTER
+              - switch:
+                  id: toggle_switch_1
+                  align: TOP_MID
+                  y: 58
+                  hidden: true
+              - switch:
+                  id: toggle_switch_2
+                  align: TOP_MID
+                  y: 58
+                  hidden: true
+              - switch:
+                  id: toggle_switch_3
+                  align: TOP_MID
+                  y: 58
+                  hidden: true
+              - switch:
+                  id: toggle_switch_4
+                  align: TOP_MID
+                  y: 58
+                  hidden: true
+              - switch:
+                  id: toggle_switch_5
+                  align: TOP_MID
+                  y: 58
+                  hidden: true
+              - switch:
+                  id: toggle_switch_6
+                  align: TOP_MID
+                  y: 58
+                  hidden: true
+              - spinbox:
+                  id: popup_spinbox_idle
+                  align: TOP_MID
+                  y: 58
+                  width: 70
+                  hidden: true
+                  rollover: false
+              - label:
+                  id: popup_copy_idle
+                  align: TOP_MID
+                  y: 25
+                  width: 130
+                  hidden: true
+                  text_color: 0xFFFF00
+                  text_align: CENTER
+              - label:
+                  id: popup_ads_label_idle
+                  align: BOTTOM_MID
+                  y: -10
+                  width: 130
+                  hidden: true
+                  text_color: 0xFFFF00
+                  text_align: CENTER
+              - slider:
+                  id: popup_slider_idle
+                  align: TOP_MID
+                  y: 58
+                  pad_all: 0
+                  width: 135
+                  height: 36
+                  min_value: 0
+                  max_value: 100
+                  value: 0
+                  bg_color: 0x3A3A3A
+                  hidden: true
+                  indicator:
+                    bg_color: 0x66CCFF
+                    radius: 0
+                  knob:
+                    bg_color: 0xFFFFFF
+                    radius: 10
+                    pad_top: 6
+                    pad_bottom: 6
+                    pad_left: -10
+                    pad_right: -10
+              - label:
+                  id: current_bright
+                  align: BOTTOM_MID
+                  y: 0
+                  hidden: true
+                  text_color: 0xFFFF00
+                  text_align: CENTER
+              - qrcode:
+                  id: popup_qrcode_idle
+                  align: BOTTOM_MID
+                  y: 0
+                  size: 140
+                  radius: 8
+                  light_color: 0xFFFFFF
+                  dark_color: 0x000000
+                  hidden: true
+                  text: "${qrlink}"
+              - button:
+                  id: confirm_label_box
+                  align: BOTTOM_LEFT
+                  y: 0
+                  hidden: true
+                  border_width: 0
+                  bg_color: 0x66CCFF
+                  width: 90
+                  height: 25
+                  focused:
+                    bg_color: 0xFF0000
+                    outline_width: 2
+                    outline_color: 0x66CCFF
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "Confirmar"
+                        text_color: 0x000000
+                  on_click:
+                    then:
+                      - lambda: |-
+                          if (id(selected_control_index) == 18) {
+                            id(rstdvc).toggle();
+                          } else if (id(selected_control_index) == 19) {
+                            id(factoryrst).toggle();
+                          }
+              - button:
+                  id: cancel_label_box
+                  align: BOTTOM_RIGHT
+                  y: 0
+                  hidden: true
+                  border_width: 0
+                  bg_color: 0x66CCFF
+                  width: 90
+                  height: 25
+                  state:
+                    focused: true
+                  focused:
+                    bg_color: 0xFF0000
+                    outline_width: 2
+                    outline_color: 0x66CCFF
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "Cancelar"
+                        text_color: 0x000000
+                        text_align: CENTER
+                  on_click:
+                    then:
+                      - script.execute: hide_popup
+              - label:
+                  id: popup_left_msg
+                  align: TOP_LEFT
+                  hidden: true
+                  y: 62
+                  text_align: CENTER
+              - label:
+                  id: popup_right_msg
+                  align: TOP_RIGHT
+                  hidden: true
+                  y: 62
+                  text_align: CENTER
